@@ -1,0 +1,191 @@
+---
+layout: post
+title: "Hello World!"
+description: "How to sort paging data in Redis like ORDER BY & LIMIT in Mysql."
+categories: [uncategorized]
+tags: [redis, sort, paging]
+redirect_from:
+  - /2018/10/19/
+---
+## 业务场景
+看到很多文章介绍的redis分页都是用list的lrange offset count 去查询id列表，然后根据id查到哈希对象，之后在代码中根据对象的某个字段做排序。
+
+虽然这样能够实现分页，但是排序的做法是错误的！因为这种排序不是对整个数据集进行排序，而是对你查出来的某一页的数据进行排序！
+
+事实上，redis提供了**先排序，再分页**的支持。
+
+
+## Redis Sort
+如果你还不了解redis的基础数据结构，建议你先了解，再接着往下看：
+reids里面有一个非常有用的命令：sort，用来给list，set，sorted set进行排序
+```
+SORT key [BY pattern] [LIMIT offset count] [GET pattern [GET pattern ...]] [ASC | DESC] [ALPHA] [STORE destination]
+```
+参数     | 解释
+-------- | ------------- 
+key|redis中的键，可以是list，set，sorted set三种类型，**按照key的值**排序，**取出key中的值**
+BY pattern|匹配模式，将key放入pattern的号替换，并**按照pattern的值**排序，**取出key中的值**
+LIMIT|和mysql的limit一样，排序后，从第offset个元素开始，取出count个元素
+GET pattern| 匹配模式，将key放入pattern的*号替换，**取出pattern中的值**，这个模式可以有多个，相当于sql中的join连接多个表
+ASC/DES| 升降序
+ALPHA|是否按照字符串顺序，默认是按照数字排序，如果你用来排序的值（key，或pattern）是字符串，则必须使用ALPHA参数，否则报**格式异常**
+STORE|将排序结果放入另一个key中存储
+
+下面做出一些简单示例
+ ## 初步：List，Set排序
+ >创建一个list，升序排序
+ ```javascript
+ 127.0.0.1:6379> lpush ids 1 2 3 4
+(integer) 4
+127.0.0.1:6379> sort ids ASC
+1) "1"
+2) "2"
+3) "3"
+4) "4" 
+```
+ >BY pattern，用pattern进行排序，并依次返回key的值
+ ```javascript
+ 127.0.0.1:6379> set user_age_1 10
+OK
+127.0.0.1:6379> set user_age_2 9
+OK
+127.0.0.1:6379> set user_age_3 8
+OK
+127.0.0.1:6379> set user_age_4 7
+OK
+127.0.0.1:6379> sort ids BY user_age_*
+1) "4"
+2) "3"
+3) "2"
+4) "1" 
+```
+**解释：这里pattern中的\*，会用ids中的值替代；相当于遍历ids，然后取出每个元素，放入pattern中，如ids中的第一个元素，会替换成user_age_1，然后放入新的临时列表。遍历完成后，比较新的临时列表{user_age_1，user_age_2，user_age_3，user_age_4}的value的大小；**
+
+python代码表示：
+```python
+def sort(keys,by_pattern): 
+	temp_dict = {} 
+	for key in keys:
+		replace_key = by_pattern.replace("*",key) #依次替换
+		replace_value = reids.get(replace_key) #获取replace_key的值
+		temp_dict[key] = replace_value #原key->replace_value
+	
+	#根据value排序,返回key
+	return [x[0] for x in sorted(d.items(),key=lambda x:x[1])]
+```
+上面获得的是用户id，如果我想获取的是用户的年龄，而不是id，怎么办？
+>GET pattern，返回（替换后）pattern的值，而不是key的值
+```javascript
+127.0.0.1:6379> sort ids BY user_age_* GET user_age_*
+1) "7"
+2) "8"
+3) "9"
+4) "10"
+```
+GET可以设置多个，相当于sql中的join
+
+ ## 进阶：Hash排序
+ 在实际业务中，我们存储对象使用hash结构，比如:
+ ```java
+ class User {
+ 	String id;
+ 	String name;
+  	int age;
+ }
+ ```
+ 在redis里面一般是这么存储的：reids 的key是user:id :1，hash key是字段名，hash value是字段值
+ ```javascript
+ 127.0.0.1:6379> hset user:id:1 name Slbai
+(integer) 1
+127.0.0.1:6379> hset user:id:1 age 13
+(integer) 1
+127.0.0.1:6379> hgetall user:id:1
+1) "name"
+2) "Slbai"
+3) "age"
+4) "13"
+ ```
+ 现在我创建了三个user
+ ID | name | age
+ --|--|--
+ 1|Slbai| 13
+ 2|Jack Ma|12
+ 3|Steve Jobs|11
+ 然后创建了一个list，存储用户id
+ ```javascript
+ 127.0.0.1:6379> lpush ids:user 1 2 3
+(integer) 3
+```
+**重点来了！！！**
+BY pattern 和 GET pattern中，redis 的hash类型 也可以作为pattern，使用key->field 的格式来获取hash中的值
+>查询用户id，根据年龄排序
+```javascript
+127.0.0.1:6379> sort ids:user BY user:id:*->age
+1) "3"
+2) "2"
+3) "1"
+```
+>查询用户年龄，根据年龄排序
+```javascript
+127.0.0.1:6379> sort ids:user BY user:id:*->age GET user:id:*->age
+1) "11"
+2) "12"
+3) "13"
+```
+>分页查询用户年龄，根据年龄排序
+```javascript
+127.0.0.1:6379> sort ids:user BY user:id:*->age GET user:id:*->age LIMIT 0 2
+1) "11"
+2) "12"
+```
+## 性能优化：缓存排序结果
+redis的特点是高性能，而排序操作的时间复杂度和排序元素的个数正相关，对于一些元素较多的排序需求，我们可以加入缓存，sort给我们提供了这种便利。
+>将查询结果存储到其他的key缓存，同时也可以设置他的过期时间，过期时间内，直接取key里面的值，优化性能
+```javascript
+127.0.0.1:6379> sort ids:user BY user:id:*->age STORE cache:ids:user
+(integer) 3
+127.0.0.1:6379> lrange cache:ids:user 0 -1
+1) "3"
+2) "2"
+3) "1"
+```
+下面将通过一个项目进行演示
+## 实战
+项目     | Value | 版本
+-------- | ------------- | -----
+语言  | java |jdk1.8
+框架| SpringBoot |2.0.4.RELEASE
+数据库  | reids | 4.x
+
+实际业务中，我们可能根据多种字段排序，比如搜索某件商品，可选根据 ‘价格’，‘距离’，‘评分’等分页+排序，而By pattern的hash形式很适合这种情况，如item：id:*->price，我们只需要将price替换为distance，就可以实现按照区域排序；
+刚才这种业务场景下，我们一般需要返回id，而不是其他字段，所以key是存储id列表的键。当然，如果你的业务需要查询单个或多个其他字段，可以添加一个或多个Get pattern。
+```java
+    /**
+     * 分页查询
+     * @param key   一般是id列表
+     * @param by_pattern 根据此pattern的value排序，除了常规的pattern，也可以接收hash的pattern
+     * @param offset  偏移量
+     * @param count  每次查询的条数
+     * @return 返回分页后的id列表
+     */
+    public List<String> sort(String key, String by_pattern, Long offset, Long count){
+        return redisTemplate.sort(
+                SortQueryBuilder
+                        .sort(key)
+                        .by(by_pattern)
+                        .alphabetical(true)
+                        .order(SortParameters.Order.DESC)
+                        .limit(offset,count)
+                        .build()
+        );
+    }
+```
+使用
+````java
+redisService.sort("ids:user","user:id:*->age",0L,3L)
+````
+在这之后，你也可以将id存储到新的key，实现缓存，减轻数据库压力；
+
+
+## 完整代码
+链接: [https://github.com/slbai/example-redis](https://github.com/slbai/example-redis).
