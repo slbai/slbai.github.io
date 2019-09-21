@@ -1,20 +1,20 @@
 ---
 layout: page
 title: About
-description: 打码改变世界
-keywords: Zhuang Ma, 马壮
+description: Cook the World
+keywords: Shi Lin
 comments: true
 menu: 关于
 permalink: /about/
 ---
 
-我是马壮，码而生，码而立。
+I am Shi Lin
 
-仰慕「优雅编码的艺术」。
+A coder who insists on doing something different
 
-坚信熟能生巧，努力改变人生。
+Life is short, Why no make it happen
 
-## 联系
+## Concat
 
 {% for website in site.data.social %}
 * {{ website.sitename }}：[@{{ website.name }}]({{ website.url }})
